@@ -772,12 +772,17 @@ applySettings(); renderHome(); checkOffline();
 if (settings.engine === 'whisper') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
-  // 第一次安裝後重新整理一次，讓多核心運算生效（只做一次）
-  const reloadOnce = () => {
-    if (window.crossOriginIsolated) return;
-    try { if (sessionStorage.getItem('coiReloaded')) return; sessionStorage.setItem('coiReloaded', '1'); } catch (e) { return; }
-    location.reload();
-  };
-  if (navigator.serviceWorker.controller) reloadOnce();
-  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+  // 重新整理一次，讓多核心運算生效
+  if (!window.crossOriginIsolated) {
+    // 新版背景程式接手時重新整理
+    navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
+    // 目前的背景程式已經會加隔離標頭，只是這一頁還沒套用：重新整理一次
+    if (navigator.serviceWorker.controller) {
+      fetch('manifest.webmanifest', { cache: 'no-store' }).then((r) => {
+        if (!r.headers.get('cross-origin-embedder-policy')) return;
+        try { if (sessionStorage.getItem('coiReloaded')) return; sessionStorage.setItem('coiReloaded', '1'); } catch (e) { return; }
+        location.reload();
+      }).catch(() => {});
+    }
+  }
 }
