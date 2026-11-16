@@ -776,6 +776,12 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   if (!window.crossOriginIsolated) {
     // 新版背景程式接手時重新整理
     navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
+    // 背景程式已準備好，但這一頁還沒被它接手：重新整理一次
+    navigator.serviceWorker.ready.then(() => setTimeout(() => {
+      if (navigator.serviceWorker.controller || window.crossOriginIsolated) return;
+      try { if (sessionStorage.getItem('coiReloaded')) return; sessionStorage.setItem('coiReloaded', '1'); } catch (e) { return; }
+      location.reload();
+    }, 1500));
     // 目前的背景程式已經會加隔離標頭，只是這一頁還沒套用：重新整理一次
     if (navigator.serviceWorker.controller) {
       fetch('manifest.webmanifest', { cache: 'no-store' }).then((r) => {
