@@ -32,7 +32,8 @@ words.forEach((w) => {
 
 const settings = Object.assign(
   { rate: 0.7, strict: 'normal', size: 'XL', lang: 'zh-TW', shuffle: false,
-    autoReplay: true, autoNext: true, voiceFeedback: true, autoSpeak: true },
+    autoReplay: true, autoNext: true, voiceFeedback: true, autoSpeak: true,
+    engine: 'whisper', model: 'tiny' },
   store.get('settings', {})
 );
 const saveWords = () => store.set('words', words);
@@ -211,7 +212,7 @@ function showScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === 'scr-' + name));
   if (name === 'home') renderHome();
   if (name === 'words') renderList();
-  if (name === 'settings') checkOffline();
+  if (name === 'settings') { if (settings.engine === 'whisper') renderWhisperStatus(); else checkOffline(); }
   window.scrollTo(0, 0);
 }
 $$('[data-home]').forEach((b) => b.onclick = () => showScreen('home'));
@@ -336,16 +337,36 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null;
 const btnSpeak = $('#btnSpeak');
 
+let busy = false; // 離線辨識運算中
 function setListening(on) {
   btnSpeak.classList.toggle('listening', on);
+  btnSpeak.classList.remove('busy');
   btnSpeak.textContent = on ? '🔴 請說…' : '🎤 我來說';
+}
+function setBusy(on) {
+  busy = on;
+  btnSpeak.classList.toggle('busy', on);
+  btnSpeak.disabled = on;
+  btnSpeak.textContent = on ? '⏳ 聽聽看…' : '🎤 我來說';
 }
 function stopListening() { if (rec) { try { rec.abort(); } catch (e) {} rec = null; setListening(false); } }
 
+// 按「我來說」：選擇用離線 (Whisper) 或線上 (Google) 辨識
 function startListening() {
-  if (!SR) { toast('這個瀏覽器不能辨識語音，請用手機的 Chrome 打開', 4000); return; }
+  if (busy) return;
   if (rec) { try { rec.stop(); } catch (e) {} return; }
   const w = current(); if (!w) return;
+  if (settings.engine === 'whisper') {
+    if (whisper.state === 'ready') return startWhisper(w);
+    if (whisper.state === 'loading') { toast('離線語音辨識準備中，請稍等一下'); return; }
+    // 還沒下載離線模型：有網路就先用線上辨識
+    if (!(SR && navigator.onLine)) { toast('請家人到「設定」下載離線語音辨識', 4000); return; }
+  }
+  startGoogle(w);
+}
+
+function startGoogle(w) {
+  if (!SR) { toast('這個瀏覽器不能辨識語音，請用手機的 Chrome 打開', 4000); return; }
   cancelVoice();
   elResult.hidden = true; renderWord();
 
@@ -386,6 +407,180 @@ function startListening() {
   try { r.start(); rec = r; setListening(true); }
   catch (e) { toast('無法開始錄音：' + e.message); }
 }
+
+/* ---------- 離線語音辨識 (Whisper) ---------- */
+const WHISPER_MODELS = {
+  tiny: 'onnx-community/whisper-tiny',
+  base: 'onnx-community/whisper-base',
+};
+const whisper = { state: 'idle', worker: null, model: '', jobs: new Map(), nextId: 1, lastMs: 0 };
+
+function whisperWorker() {
+  if (whisper.worker) return whisper.worker;
+  const wk = new Worker('worker.js', { type: 'module' });
+  wk.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'progress') {
+      const pct = Math.round((m.loaded / m.total) * 100);
+      renderWhisperStatus(`下載中… ${pct}%（${(m.loaded / 1048576).toFixed(0)} / ${(m.total / 1048576).toFixed(0)} MB）`, pct);
+    } else if (m.type === 'ready') {
+      whisper.state = 'ready';
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+      renderWhisperStatus();
+    } else if (m.type === 'result' || (m.type === 'error' && m.id)) {
+      const job = whisper.jobs.get(m.id); whisper.jobs.delete(m.id);
+      if (job) m.type === 'result' ? job.resolve(m) : job.reject(new Error(m.message));
+    } else if (m.type === 'error') {
+      whisper.state = 'error';
+      renderWhisperStatus('下載或載入失敗：' + m.message + '（請確認有網路再試一次）');
+    }
+  };
+  wk.onerror = (e) => {
+    whisper.state = 'error';
+    renderWhisperStatus('離線辨識無法啟動：' + (e.message || '這台裝置可能不支援'));
+  };
+  whisper.worker = wk;
+  return wk;
+}
+
+function loadWhisper() {
+  const model = WHISPER_MODELS[settings.model];
+  if (whisper.state === 'ready' && whisper.model === model) return;
+  whisper.state = 'loading'; whisper.model = model;
+  renderWhisperStatus('準備中…', 0);
+  whisperWorker().postMessage({ type: 'load', model });
+}
+
+// 檢查模型是否已經下載過（存在瀏覽器裡）
+async function whisperCached(modelKey) {
+  try {
+    const model = WHISPER_MODELS[modelKey];
+    const keys = await (await caches.open('transformers-cache')).keys();
+    const has = (part) => keys.some((r) => r.url.includes(model + '/') && r.url.includes(part));
+    return has('encoder_model') && has('decoder_model_merged');
+  } catch (e) { return false; }
+}
+
+function transcribe(audio) {
+  const id = whisper.nextId++;
+  const language = settings.lang.startsWith('en') ? 'english' : 'chinese';
+  return new Promise((resolve, reject) => {
+    whisper.jobs.set(id, { resolve, reject });
+    whisperWorker().postMessage({ type: 'transcribe', id, audio, language }, [audio.buffer]);
+  });
+}
+
+// 錄音：偵測到說話開始，說完停頓約 1 秒就自動停止
+function recordUtterance() {
+  return new Promise(async (resolve) => {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) { resolve({ error: 'not-allowed' }); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC({ sampleRate: 16000 });
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(2048, 1, 1);
+    const chunks = [], pre = [];
+    let speaking = false, lastVoice = 0, noise = 0, noiseN = 0, done = false;
+    const t0 = performance.now();
+
+    const finish = (keep, error) => {
+      if (done) return; done = true;
+      try { proc.disconnect(); src.disconnect(); } catch (e) {}
+      stream.getTracks().forEach((t) => t.stop());
+      ctx.close().catch(() => {});
+      rec = null; setListening(false);
+      if (!keep || !chunks.length) { resolve({ error: error || 'aborted' }); return; }
+      const len = chunks.reduce((s, c) => s + c.length, 0);
+      const audio = new Float32Array(len);
+      let off = 0; for (const c of chunks) { audio.set(c, off); off += c.length; }
+      // 採樣率不是 16000 時重新取樣
+      resolve({ audio: ctx.sampleRate === 16000 ? audio : resample(audio, ctx.sampleRate, 16000) });
+    };
+
+    proc.onaudioprocess = (e) => {
+      if (done) return;
+      const d = new Float32Array(e.inputBuffer.getChannelData(0));
+      let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+      const rms = Math.sqrt(s / d.length);
+      const t = performance.now() - t0;
+      if (t < 300) { noise += rms; noiseN++; pre.push(d); return; } // 先聽一下環境噪音
+      const th = Math.min(0.06, Math.max(0.015, (noise / Math.max(1, noiseN)) * 2.5));
+      if (!speaking) {
+        pre.push(d); if (pre.length > 5) pre.shift();
+        if (rms > th) { speaking = true; chunks.push(...pre); lastVoice = t; }
+        else if (t > 7000) finish(false, 'no-speech');
+      } else {
+        chunks.push(d);
+        if (rms > th) lastVoice = t;
+        if (t - lastVoice > 1000 || t > 10000) finish(true);
+      }
+    };
+    src.connect(proc); proc.connect(ctx.destination);
+    // 再按一次「我來說」：有說話就直接判斷，沒說話就取消
+    rec = { stop: () => finish(speaking), abort: () => finish(false) };
+    setListening(true);
+  });
+}
+
+function resample(data, from, to) {
+  const ratio = from / to, out = new Float32Array(Math.floor(data.length / ratio));
+  for (let i = 0; i < out.length; i++) out[i] = data[Math.floor(i * ratio)];
+  return out;
+}
+
+// Whisper 沒聽到東西時常會冒出的字幕用語
+const HALLUCINATION = /字幕|訂閱|订阅|點讚|点赞|amara|請不吝|请不吝|明鏡|明镜|中文字幕/i;
+
+async function startWhisper(w) {
+  cancelVoice();
+  elResult.hidden = true; renderWord();
+  const r = await recordUtterance();
+  if (r.error) {
+    if (r.error === 'no-speech') toast('沒有聽到聲音，再按一次「我來說」');
+    else if (r.error === 'not-allowed') toast('請允許使用麥克風', 4000);
+    return;
+  }
+  setBusy(true);
+  try {
+    const res = await transcribe(r.audio);
+    whisper.lastMs = res.ms;
+    const text = res.text.trim();
+    console.log('[whisper]', text, res.ms + 'ms');
+    setBusy(false);
+    if (current() !== w) return;
+    if (!norm(text) || HALLUCINATION.test(text)) { toast('沒聽清楚，再說一次看看'); return; }
+    showResult(judge([text], w));
+  } catch (e) {
+    setBusy(false);
+    toast('辨識失敗：' + e.message, 4000);
+  }
+}
+
+async function renderWhisperStatus(msg, pct) {
+  const el = $('#whisperStatus'), prog = $('#whisperProg'), btn = $('#btnWhisperDl');
+  if (!el) return;
+  prog.hidden = pct === undefined;
+  if (pct !== undefined) prog.value = pct;
+  if (msg) { el.textContent = msg; btn.hidden = whisper.state === 'loading'; return; }
+  const sameModel = whisper.model === WHISPER_MODELS[settings.model];
+  if (whisper.state === 'ready' && sameModel) {
+    el.textContent = '✔ 已可離線辨識，不用網路也能練習。' + (whisper.lastMs ? `（上次辨識花了 ${(whisper.lastMs / 1000).toFixed(1)} 秒）` : '');
+    btn.hidden = true;
+  } else if (whisper.state === 'loading' && sameModel) {
+    btn.hidden = true;
+  } else {
+    const cached = await whisperCached(settings.model);
+    el.textContent = cached ? '已下載，載入中…' : '還沒下載。';
+    btn.hidden = cached;
+    if (cached) loadWhisper();
+  }
+}
+$('#btnWhisperDl').onclick = () => {
+  if (!navigator.onLine) { toast('下載需要網路'); return; }
+  loadWhisper();
+};
 
 /* ---------- 練習按鈕 ---------- */
 // 「聽」：第一次正常唸，再按一次會一個字一個字慢慢唸，輪流
@@ -551,6 +746,10 @@ function applySettings() {
   $$('#sizeSeg button').forEach((b) => b.setAttribute('aria-checked', b.dataset.v === settings.size));
   $('#lang').value = settings.lang;
   TOGGLES.forEach((k) => { $('#' + k).checked = !!settings[k]; });
+  $$('#engineSeg button').forEach((b) => b.setAttribute('aria-checked', b.dataset.v === settings.engine));
+  $$('#modelSeg button').forEach((b) => b.setAttribute('aria-checked', b.dataset.v === settings.model));
+  $('#whisperBox').hidden = settings.engine !== 'whisper';
+  $('#googleBox').hidden = settings.engine !== 'google';
   document.documentElement.lang = settings.lang.startsWith('en') ? 'en' : 'zh-Hant';
 }
 $('#rate').oninput = (e) => { settings.rate = +e.target.value; saveSettings(); applySettings(); };
@@ -559,9 +758,26 @@ $$('#strictSeg button').forEach((b) => b.onclick = () => { settings.strict = b.d
 $$('#sizeSeg button').forEach((b) => b.onclick = () => { settings.size = b.dataset.v; saveSettings(); applySettings(); });
 $('#lang').onchange = (e) => { settings.lang = e.target.value; saveSettings(); applySettings(); checkOffline(); };
 TOGGLES.forEach((k) => { $('#' + k).onchange = (e) => { settings[k] = e.target.checked; saveSettings(); }; });
+$$('#engineSeg button').forEach((b) => b.onclick = () => {
+  settings.engine = b.dataset.v; saveSettings(); applySettings();
+  if (settings.engine === 'whisper') renderWhisperStatus(); else checkOffline();
+});
+$$('#modelSeg button').forEach((b) => b.onclick = () => {
+  settings.model = b.dataset.v; saveSettings(); applySettings(); renderWhisperStatus();
+});
 
 /* ---------- 啟動 ---------- */
 applySettings(); renderHome(); checkOffline();
+// 已下載過離線模型的話，開 App 時就先在背景載入
+if (settings.engine === 'whisper') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  // 第一次安裝後重新整理一次，讓多核心運算生效（只做一次）
+  const reloadOnce = () => {
+    if (window.crossOriginIsolated) return;
+    try { if (sessionStorage.getItem('coiReloaded')) return; sessionStorage.setItem('coiReloaded', '1'); } catch (e) { return; }
+    location.reload();
+  };
+  if (navigator.serviceWorker.controller) reloadOnce();
+  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
 }

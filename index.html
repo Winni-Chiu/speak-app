@@ -131,9 +131,28 @@
     </div>
 
     <div class="panel">
-      <div class="lbl">離線語音辨識</div>
-      <p id="offlineStatus" class="small">檢查中…</p>
-      <button id="btnInstallOffline" class="mid" type="button" hidden>⬇ 下載離線語音辨識</button>
+      <div class="lbl">語音辨識方式</div>
+      <div class="seg" role="radiogroup" id="engineSeg">
+        <button type="button" data-v="whisper">離線<small>不用網路</small></button>
+        <button type="button" data-v="google">線上<small>要網路</small></button>
+      </div>
+
+      <div id="whisperBox">
+        <div class="lbl">離線辨識模型</div>
+        <div class="seg" role="radiogroup" id="modelSeg">
+          <button type="button" data-v="tiny">標準（建議）<small>約 60MB・較快</small></button>
+          <button type="button" data-v="base">加強<small>約 95MB・較慢</small></button>
+        </div>
+        <p id="whisperStatus" class="small"></p>
+        <progress id="whisperProg" max="100" value="0" hidden></progress>
+        <button id="btnWhisperDl" class="mid" type="button">⬇ 下載離線語音辨識</button>
+        <p class="small">下載一次就好（請用 Wi-Fi）。之後不用網路也能判斷說得對不對。</p>
+      </div>
+
+      <div id="googleBox">
+        <p id="offlineStatus" class="small">檢查中…</p>
+        <button id="btnInstallOffline" class="mid" type="button" hidden>⬇ 下載 Google 離線語音包</button>
+      </div>
     </div>
   </section>
 </main>
