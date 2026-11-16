@@ -1,0 +1,15 @@
+{
+  "name": "說說看 — 說話練習",
+  "short_name": "說說看",
+  "description": "給失語症朋友的說話練習：聽發音、跟著說、立即回饋。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f3ec",
+  "theme_color": "#2f6f5e",
+  "lang": "zh-Hant",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
