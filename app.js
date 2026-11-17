@@ -52,6 +52,7 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 
 /* ---------- Android 版 App：改用手機內建的 Google 語音辨識與發音 ---------- */
 const ANDROID = window.AndroidSpeech || null;
+let androidTrace = ''; // 這次辨識試了哪些引擎、結果如何（寫進辨識紀錄）
 let ttsSeq = 0;
 const ttsWaiters = new Map();
 window.__androidTTS = (id) => { const f = ttsWaiters.get(id); if (f) f(); };
@@ -64,6 +65,7 @@ class AndroidRecognition {
 }
 window.__androidSR = (m) => {
   const r = AndroidRecognition.active; if (!r) return;
+  if (m.trace) androidTrace = m.trace;
   if (m.type === 'result') {
     const alt = (m.alts || []).map((t) => ({ transcript: t, confidence: 0 }));
     alt.isFinal = true;
@@ -257,6 +259,7 @@ function showScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === 'scr-' + name));
   if (name === 'home') renderHome();
   if (name === 'words') renderList();
+  if (name === 'settings' && ANDROID) { try { $('#micTestOut').textContent = ANDROID.diagInfo(); } catch (e) {} }
   if (name === 'settings') { if (ANDROID || settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); refreshDelBox(); }
   window.scrollTo(0, 0);
 }
@@ -400,10 +403,13 @@ function stopListening() { if (rec) { try { rec.abort(); } catch (e) {} rec = nu
 let recLog = store.get('recLog', []);
 let lastAudio = null; // 最近一次離線辨識錄到的聲音，可以播放檢查
 const ENGINE_NAME = { whisper: '離線', google: ANDROID ? 'Google' : '線上' };
-function logAttempt(engine, target, heard, r, ms) {
+function logAttempt(engine, target, heard, r, ms, note) {
+  const parts = [note, engine === 'google' && ANDROID ? androidTrace : ''].filter(Boolean);
+  androidTrace = '';
   recLog.unshift({
     t: Date.now(), engine, target, heard: heard.slice(0, 5),
     result: r ? (r.pass ? (r.perfect ? 'ok' : 'close') : 'bad') : 'none', ms: ms || 0,
+    note: parts.join('・'),
   });
   recLog = recLog.slice(0, 30);
   store.set('recLog', recLog);
@@ -418,7 +424,7 @@ function renderLog() {
     const time = new Date(x.t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
     li.innerHTML = `<span class="log-mark log-${x.result}">${mark[x.result]}</span>
       <span class="log-main">要說「${escapeHtml(x.target)}」→ 聽到「${escapeHtml(x.heard[0] || '（沒有）')}」
-      <span class="small">${time}・${ENGINE_NAME[x.engine] || x.engine}${x.ms ? `・${(x.ms / 1000).toFixed(1)} 秒` : ''}${x.heard.length > 1 ? `・其他：${escapeHtml(x.heard.slice(1).join('、'))}` : ''}</span></span>`;
+      <span class="small">${time}・${ENGINE_NAME[x.engine] || x.engine}${x.ms ? `・${(x.ms / 1000).toFixed(1)} 秒` : ''}${x.heard.length > 1 ? `・其他：${escapeHtml(x.heard.slice(1).join('、'))}` : ''}</span>${x.note ? `<span class="small">${escapeHtml(x.note)}</span>` : ''}</span>`;
     ul.appendChild(li);
   }
 }
@@ -477,6 +483,7 @@ function startGoogle(w) {
   };
   r.onerror = (e) => {
     errored = true;
+    if (e.error !== 'aborted') logAttempt('google', w.text, [], null, 0, '錯誤：' + e.error);
     // 自動模式下線上辨識失敗：之後改用離線
     if (settings.engine === 'auto' && (e.error === 'network' || e.error === 'service-not-allowed') && whisper.state === 'ready') {
       googleFailed = true; toast('網路不穩，改用離線辨識，請再說一次'); return;

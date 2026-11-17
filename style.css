@@ -149,6 +149,7 @@ input[type=range] { width: 100%; height: 40px; accent-color: var(--brand); }
 #whisperBox, #googleBox { margin-top: 12px; }
 progress { width: 100%; height: 22px; accent-color: var(--brand); margin-top: 8px; }
 .btn-speak.busy { background: var(--listen); }
+#micTestOut { white-space: pre-line; }
 .rec-log { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; font-size: 0.8em; }
 .rec-log li { display: flex; gap: 10px; align-items: flex-start; border-top: 1px solid var(--line); padding-top: 8px; }
 .rec-log .small { display: block; margin: 2px 0 0; }

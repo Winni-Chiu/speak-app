@@ -2,8 +2,10 @@ package tw.speakapp.practice;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -12,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.speech.RecognitionListener;
+import android.speech.RecognitionService;
 import android.speech.RecognitionSupport;
 import android.speech.RecognitionSupportCallback;
 import android.speech.RecognizerIntent;
@@ -55,7 +58,6 @@ public class MainActivity extends Activity {
     private SpeechRecognizer recognizer;
     private int session = 0;          // 每次開始聽都 +1，舊的回呼一律忽略
     private boolean usingOnDevice = false;
-    private boolean triedOnDevice = false;
     private String currentLang = "zh-TW";
     private String pendingLang = null; // 等待麥克風權限
     private SpeechRecognizer helperRecognizer; // 檢查 / 下載離線語音包用
@@ -146,7 +148,7 @@ public class MainActivity extends Activity {
     /* ================= JavaScript 介面 ================= */
     private class Bridge {
         @JavascriptInterface public void startListening(String lang) {
-            runOnUiThread(() -> { triedOnDevice = false; beginListening(lang, false); });
+            runOnUiThread(() -> beginListening(lang));
         }
         @JavascriptInterface public void stopListening() {
             runOnUiThread(() -> { if (recognizer != null) recognizer.stopListening(); });
@@ -168,6 +170,7 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public boolean isOnline() { return MainActivity.this.isOnline(); }
         @JavascriptInterface public int sdk() { return Build.VERSION.SDK_INT; }
+        @JavascriptInterface public String diagInfo() { return MainActivity.this.diagInfo(); }
         @JavascriptInterface public void checkOffline(String lang) { runOnUiThread(() -> doCheckOffline(lang)); }
         @JavascriptInterface public void downloadOffline(String lang) { runOnUiThread(() -> doDownloadOffline(lang)); }
         @JavascriptInterface public void openVoiceSettings() { runOnUiThread(MainActivity.this::openVoiceSettings); }
@@ -185,38 +188,88 @@ public class MainActivity extends Activity {
     }
 
     /* ================= 語音辨識 ================= */
-    private void beginListening(String lang, boolean onDevice) {
+    // 依序嘗試的辨識引擎："default"、"ondevice"，或某個辨識服務的元件名稱
+    private final List<String> attempts = new ArrayList<>();
+    private int attemptIdx = 0;
+    private long attemptStart = 0;
+    private boolean began = false;
+    private final StringBuilder trace = new StringBuilder();
+
+    private void beginListening(String lang) {
         currentLang = lang;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pendingLang = lang;
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             return;
         }
+        attempts.clear();
+        attempts.add("default");
+        for (ComponentName c : recognitionServices()) attempts.add(c.flattenToString());
+        if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) attempts.add("ondevice");
+        attemptIdx = 0;
+        trace.setLength(0);
+        trace.append(isOnline() ? "有網路" : "沒網路");
+        runAttempt();
+    }
+
+    /** 手機上所有語音辨識服務，Google 的排前面 */
+    private List<ComponentName> recognitionServices() {
+        List<ComponentName> out = new ArrayList<>();
+        try {
+            List<ResolveInfo> list = getPackageManager().queryIntentServices(new Intent(RecognitionService.SERVICE_INTERFACE), 0);
+            for (ResolveInfo ri : list) {
+                if (ri.serviceInfo == null) continue;
+                ComponentName c = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
+                if (ri.serviceInfo.packageName.startsWith("com.google")) out.add(0, c); else out.add(c);
+            }
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    private static String label(String a) {
+        if (a.equals("default")) return "預設";
+        if (a.equals("ondevice")) return "裝置端";
+        if (a.contains("googlequicksearchbox")) return "Google App";
+        if (a.contains("com.google.android.tts")) return "Google 語音服務";
+        if (a.contains("com.google.android.as")) return "Google 系統智慧";
+        if (a.contains("samsung")) return "三星";
+        int slash = a.indexOf('/');
+        return slash > 0 ? a.substring(0, slash) : a;
+    }
+
+    private void runAttempt() {
         destroyRecognizer();
         final int my = ++session;
-
-        if (onDevice && Build.VERSION.SDK_INT >= 31) {
-            recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
-            usingOnDevice = true;
-        } else {
-            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-                emitSR("{\"type\":\"error\",\"error\":\"not-available\"}");
-                emitSR("{\"type\":\"end\"}");
-                return;
+        final String a = attempts.get(attemptIdx);
+        final boolean online = isOnline();
+        try {
+            if (a.equals("ondevice")) {
+                recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+            } else if (a.equals("default")) {
+                if (!SpeechRecognizer.isRecognitionAvailable(this)) throw new IllegalStateException("not-available");
+                recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            } else {
+                recognizer = SpeechRecognizer.createSpeechRecognizer(this, ComponentName.unflattenFromString(a));
             }
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            usingOnDevice = false;
+        } catch (Exception e) {
+            trace.append(" → ").append(label(a)).append(":無法啟動");
+            nextAttemptOrFail("not-available");
+            return;
         }
+        usingOnDevice = a.equals("ondevice");
+        began = false;
+        attemptStart = System.currentTimeMillis();
 
         recognizer.setRecognitionListener(new RecognitionListener() {
             @Override public void onResults(Bundle b) {
                 if (my != session) return;
                 ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                trace.append(" → ").append(label(a)).append(":成功");
                 JSONObject o = new JSONObject();
                 try {
                     o.put("type", "result");
                     o.put("alts", new JSONArray(list == null ? new ArrayList<String>() : list));
-                    o.put("offline", usingOnDevice || !isOnline());
+                    o.put("trace", trace.toString());
                 } catch (Exception ignored) { }
                 session++;
                 destroyRecognizer();
@@ -227,22 +280,20 @@ public class MainActivity extends Activity {
             @Override public void onError(int err) {
                 if (my != session) return;
                 String code = errorCode(err);
-                // 沒網路、Google 語音包又不能用時，Android 12 以上改試手機內建的裝置端辨識
-                if (!usingOnDevice && !triedOnDevice && !isOnline()
-                        && (code.equals("network") || code.equals("language-not-supported"))
-                        && Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(MainActivity.this)) {
-                    triedOnDevice = true;
-                    beginListening(currentLang, true);
-                    return;
-                }
+                trace.append(" → ").append(label(a)).append(":").append(code).append("(").append(err).append(")");
+                long elapsed = System.currentTimeMillis() - attemptStart;
+                // 這個引擎不能用（通常是沒網路又沒離線語音包）：換下一個引擎再試
+                boolean engineFailed = !code.equals("not-allowed") && !began
+                        && (!online || code.equals("language-not-supported") || code.startsWith("error-"))
+                        && !(code.equals("no-speech") && elapsed > 3000);
+                if (engineFailed) { nextAttemptOrFail(code); return; }
                 session++;
                 destroyRecognizer();
-                emitSR("{\"type\":\"error\",\"error\":\"" + code + "\"}");
-                emitSR("{\"type\":\"end\"}");
+                emitError(code);
             }
 
             @Override public void onReadyForSpeech(Bundle params) { }
-            @Override public void onBeginningOfSpeech() { }
+            @Override public void onBeginningOfSpeech() { began = true; }
             @Override public void onRmsChanged(float rmsdB) { }
             @Override public void onBufferReceived(byte[] buffer) { }
             @Override public void onEndOfSpeech() { }
@@ -250,7 +301,44 @@ public class MainActivity extends Activity {
             @Override public void onEvent(int eventType, Bundle params) { }
         });
 
-        recognizer.startListening(recognizeIntent(lang, !isOnline()));
+        recognizer.startListening(recognizeIntent(currentLang, !online));
+    }
+
+    private void nextAttemptOrFail(String code) {
+        if (attemptIdx + 1 < attempts.size()) {
+            attemptIdx++;
+            runAttempt();
+            return;
+        }
+        session++;
+        destroyRecognizer();
+        emitError(code);
+    }
+
+    private void emitError(String code) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("type", "error");
+            o.put("error", code);
+            o.put("trace", trace.toString());
+        } catch (Exception ignored) { }
+        emitSR(o.toString());
+        emitSR("{\"type\":\"end\"}");
+    }
+
+    /** 給設定頁顯示：手機有哪些辨識服務 */
+    private String diagInfo() {
+        StringBuilder sb = new StringBuilder("Android ").append(Build.VERSION.RELEASE)
+                .append("・").append(Build.MANUFACTURER).append(" ").append(Build.MODEL)
+                .append("\n辨識服務：");
+        List<ComponentName> list = recognitionServices();
+        if (list.isEmpty()) sb.append("（沒有）");
+        for (int i = 0; i < list.size(); i++) sb.append(i == 0 ? "" : "、").append(label(list.get(i).flattenToString()));
+        sb.append("\n裝置端辨識：");
+        if (Build.VERSION.SDK_INT >= 31) sb.append(SpeechRecognizer.isOnDeviceRecognitionAvailable(this) ? "可用" : "不可用");
+        else sb.append("Android 版本不支援");
+        sb.append("\n網路：").append(isOnline() ? "有" : "沒有");
+        return sb.toString();
     }
 
     private Intent recognizeIntent(String lang, boolean preferOffline) {
@@ -397,8 +485,7 @@ public class MainActivity extends Activity {
         String lang = pendingLang;
         pendingLang = null;
         if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED && lang != null) {
-            triedOnDevice = false;
-            beginListening(lang, false);
+            beginListening(lang);
         } else {
             emitSR("{\"type\":\"error\",\"error\":\"not-allowed\"}");
             emitSR("{\"type\":\"end\"}");
