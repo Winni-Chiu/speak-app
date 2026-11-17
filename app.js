@@ -214,7 +214,7 @@ function showScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === 'scr-' + name));
   if (name === 'home') renderHome();
   if (name === 'words') renderList();
-  if (name === 'settings') { if (settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); }
+  if (name === 'settings') { if (settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); refreshDelBox(); }
   window.scrollTo(0, 0);
 }
 $$('[data-home]').forEach((b) => b.onclick = () => showScreen('home'));
@@ -479,7 +479,7 @@ function whisperWorker() {
     } else if (m.type === 'ready') {
       whisper.state = 'ready';
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      renderWhisperStatus();
+      renderWhisperStatus(); refreshDelBox();
     } else if (m.type === 'result' || (m.type === 'error' && m.id)) {
       const job = whisper.jobs.get(m.id); whisper.jobs.delete(m.id);
       if (job) m.type === 'result' ? job.resolve(m) : job.reject(new Error(m.message));
@@ -508,6 +508,7 @@ function loadWhisper() {
 async function whisperCached(modelKey) {
   try {
     const model = WHISPER_MODELS[modelKey];
+    if (!(await caches.has('transformers-cache'))) return false; // 不要用 open，open 會建立空的快取
     const keys = await (await caches.open('transformers-cache')).keys();
     const has = (part) => keys.some((r) => r.url.includes(model + '/') && r.url.includes(part));
     return has('encoder_model') && has('decoder_model_merged');
@@ -639,6 +640,34 @@ async function renderWhisperStatus(msg, pct) {
 $('#btnWhisperDl').onclick = () => {
   if (!navigator.onLine) { toast('下載需要網路'); return; }
   loadWhisper();
+};
+
+/* 刪除已下載的離線語音辨識（模型 + 引擎檔），釋放手機空間 */
+const isOfflineCache = (k) => k === 'transformers-cache' || k.startsWith('speak-engine-');
+async function refreshDelBox() {
+  try {
+    const keys = (await caches.keys()).filter(isOfflineCache);
+    $('#delBox').hidden = keys.length === 0;
+    if (keys.length && navigator.storage && navigator.storage.estimate) {
+      const { usage } = await navigator.storage.estimate();
+      $('#delInfo').textContent = usage ? `這個 App 目前佔用約 ${(usage / 1048576).toFixed(0)} MB。刪除後可以釋放大部分空間。` : '';
+    }
+  } catch (e) { $('#delBox').hidden = true; }
+}
+$('#btnWhisperDel').onclick = async () => {
+  if (!confirm('要刪除已下載的離線語音辨識嗎？\n刪除後要有網路才能判斷說得對不對。')) return;
+  if (whisper.worker) { whisper.worker.terminate(); whisper.worker = null; }
+  whisper.jobs.forEach((j) => j.reject(new Error('已刪除'))); whisper.jobs.clear();
+  whisper.state = 'idle'; whisper.model = ''; whisper.lastMs = 0;
+  try {
+    const keys = (await caches.keys()).filter(isOfflineCache);
+    await Promise.all(keys.map((k) => caches.delete(k)));
+  } catch (e) {}
+  if (settings.engine === 'whisper') settings.engine = 'google';
+  googleFailed = false; saveSettings(); applySettings();
+  if (settings.engine === 'google') checkOffline(); else renderWhisperStatus();
+  refreshDelBox();
+  toast('已刪除離線語音辨識');
 };
 
 /* ---------- 練習按鈕 ---------- */
