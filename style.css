@@ -148,6 +148,14 @@ input[type=range] { width: 100%; height: 40px; accent-color: var(--brand); }
 #whisperBox, #googleBox { margin-top: 12px; }
 progress { width: 100%; height: 22px; accent-color: var(--brand); margin-top: 8px; }
 .btn-speak.busy { background: var(--listen); }
+.rec-log { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; font-size: 0.8em; }
+.rec-log li { display: flex; gap: 10px; align-items: flex-start; border-top: 1px solid var(--line); padding-top: 8px; }
+.rec-log .small { display: block; margin: 2px 0 0; }
+.log-mark { font-weight: 800; width: 1.2em; flex: none; }
+.log-ok, .log-close { color: var(--ok); }
+.log-bad { color: var(--bad); }
+.log-none { color: var(--muted); }
+.log-main { min-width: 0; overflow-wrap: anywhere; }
 .seg button[aria-checked="true"] { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
 
 /* ---- 對話框 / 提示 ---- */

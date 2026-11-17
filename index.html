@@ -133,6 +133,7 @@
     <div class="panel">
       <div class="lbl">語音辨識方式</div>
       <div class="seg" role="radiogroup" id="engineSeg">
+        <button type="button" data-v="auto">自動<small>有網路用線上</small></button>
         <button type="button" data-v="whisper">離線<small>不用網路</small></button>
         <button type="button" data-v="google">線上<small>要網路</small></button>
       </div>
@@ -154,6 +155,18 @@
         <button id="btnInstallOffline" class="mid" type="button" hidden>⬇ 下載 Google 離線語音包</button>
       </div>
     </div>
+
+    <details class="panel" id="diagPanel">
+      <summary>辨識紀錄與麥克風測試</summary>
+      <p class="small">如果一直被判錯，可以在這裡看 App 實際聽到什麼。</p>
+      <div class="row-wrap">
+        <button id="btnMicTest" class="mid" type="button">🎙 測試麥克風</button>
+        <button id="btnPlayLast" class="mid" type="button">▶ 播放上次錄到的聲音</button>
+        <button id="btnClearLog" class="mid ghost" type="button">清除紀錄</button>
+      </div>
+      <p id="micTestOut" class="small"></p>
+      <ul id="recLog" class="rec-log"></ul>
+    </details>
   </section>
 </main>
 

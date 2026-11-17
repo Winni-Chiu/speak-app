@@ -33,9 +33,11 @@ words.forEach((w) => {
 const settings = Object.assign(
   { rate: 0.7, strict: 'normal', size: 'XL', lang: 'zh-TW', shuffle: false,
     autoReplay: true, autoNext: true, voiceFeedback: true, autoSpeak: true,
-    engine: 'whisper', model: 'tiny' },
+    engine: 'auto', model: 'tiny' },
   store.get('settings', {})
 );
+// 新版預設改成「自動」（有網路用比較準的線上辨識）
+if (settings.engineV !== 2) { settings.engine = 'auto'; settings.engineV = 2; store.set('settings', settings); }
 const saveWords = () => store.set('words', words);
 const saveSettings = () => store.set('settings', settings);
 saveWords();
@@ -212,7 +214,7 @@ function showScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === 'scr-' + name));
   if (name === 'home') renderHome();
   if (name === 'words') renderList();
-  if (name === 'settings') { if (settings.engine === 'whisper') renderWhisperStatus(); else checkOffline(); }
+  if (name === 'settings') { if (settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); }
   window.scrollTo(0, 0);
 }
 $$('[data-home]').forEach((b) => b.onclick = () => showScreen('home'));
@@ -351,12 +353,56 @@ function setBusy(on) {
 }
 function stopListening() { if (rec) { try { rec.abort(); } catch (e) {} rec = null; setListening(false); } }
 
-// 按「我來說」：選擇用離線 (Whisper) 或線上 (Google) 辨識
+/* ---------- 辨識紀錄（給家人查看辨識狀況） ---------- */
+let recLog = store.get('recLog', []);
+let lastAudio = null; // 最近一次離線辨識錄到的聲音，可以播放檢查
+const ENGINE_NAME = { whisper: '離線', google: '線上' };
+function logAttempt(engine, target, heard, r, ms) {
+  recLog.unshift({
+    t: Date.now(), engine, target, heard: heard.slice(0, 5),
+    result: r ? (r.pass ? (r.perfect ? 'ok' : 'close') : 'bad') : 'none', ms: ms || 0,
+  });
+  recLog = recLog.slice(0, 30);
+  store.set('recLog', recLog);
+}
+function renderLog() {
+  const ul = $('#recLog'); if (!ul) return;
+  ul.innerHTML = '';
+  if (!recLog.length) { ul.innerHTML = '<li class="small">還沒有紀錄。</li>'; return; }
+  const mark = { ok: '✔', close: '≈', bad: '✖', none: '－' };
+  for (const x of recLog) {
+    const li = document.createElement('li');
+    const time = new Date(x.t).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    li.innerHTML = `<span class="log-mark log-${x.result}">${mark[x.result]}</span>
+      <span class="log-main">要說「${escapeHtml(x.target)}」→ 聽到「${escapeHtml(x.heard[0] || '（沒有）')}」
+      <span class="small">${time}・${ENGINE_NAME[x.engine] || x.engine}${x.ms ? `・${(x.ms / 1000).toFixed(1)} 秒` : ''}${x.heard.length > 1 ? `・其他：${escapeHtml(x.heard.slice(1).join('、'))}` : ''}</span></span>`;
+    ul.appendChild(li);
+  }
+}
+function playAudio(audio) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ctx.createBuffer(1, audio.length, 16000);
+    buf.copyToChannel(audio, 0);
+    const s = ctx.createBufferSource(); s.buffer = buf; s.connect(ctx.destination);
+    s.onended = () => ctx.close(); s.start();
+  } catch (e) { toast('無法播放：' + e.message); }
+}
+
+// 用哪一種辨識：自動 = 有網路用線上（比較準），沒網路用離線
+let googleFailed = false;
+function pickEngine() {
+  if (settings.engine === 'google') return 'google';
+  if (settings.engine === 'auto' && SR && navigator.onLine && !googleFailed) return 'google';
+  return 'whisper';
+}
+
+// 按「我來說」
 function startListening() {
   if (busy) return;
   if (rec) { try { rec.stop(); } catch (e) {} return; }
   const w = current(); if (!w) return;
-  if (settings.engine === 'whisper') {
+  if (pickEngine() === 'whisper') {
     if (whisper.state === 'ready') return startWhisper(w);
     if (whisper.state === 'loading') { toast('離線語音辨識準備中，請稍等一下'); return; }
     // 還沒下載離線模型：有網路就先用線上辨識
@@ -388,6 +434,10 @@ function startGoogle(w) {
   };
   r.onerror = (e) => {
     errored = true;
+    // 自動模式下線上辨識失敗：之後改用離線
+    if (settings.engine === 'auto' && (e.error === 'network' || e.error === 'service-not-allowed') && whisper.state === 'ready') {
+      googleFailed = true; toast('網路不穩，改用離線辨識，請再說一次'); return;
+    }
     const msg = {
       'no-speech': '沒有聽到聲音，再按一次「我來說」',
       'audio-capture': '找不到麥克風',
@@ -401,8 +451,11 @@ function startGoogle(w) {
   };
   r.onend = () => {
     rec = null; setListening(false);
-    if (alts && alts.length && current() === w) showResult(judge(alts, w));
-    else if (!errored) toast('沒聽清楚，再說一次看看');
+    if (alts && alts.length && current() === w) {
+      const res = judge(alts, w);
+      logAttempt('google', w.text, alts, res);
+      showResult(res);
+    } else if (!errored) { logAttempt('google', w.text, [], null); toast('沒聽清楚，再說一次看看'); }
   };
   try { r.start(); rec = r; setListening(true); }
   catch (e) { toast('無法開始錄音：' + e.message); }
@@ -543,6 +596,7 @@ async function startWhisper(w) {
     return;
   }
   setBusy(true);
+  lastAudio = r.audio.slice(); // 留一份，給設定頁播放檢查
   try {
     const res = await transcribe(r.audio);
     whisper.lastMs = res.ms;
@@ -550,8 +604,13 @@ async function startWhisper(w) {
     console.log('[whisper]', text, res.ms + 'ms');
     setBusy(false);
     if (current() !== w) return;
-    if (!norm(text) || HALLUCINATION.test(text)) { toast('沒聽清楚，再說一次看看'); return; }
-    showResult(judge([text], w));
+    if (!norm(text) || HALLUCINATION.test(text)) {
+      logAttempt('whisper', w.text, [text], null, res.ms);
+      toast('沒聽清楚，再說一次看看'); return;
+    }
+    const jr = judge([text], w);
+    logAttempt('whisper', w.text, [text], jr, res.ms);
+    showResult(jr);
   } catch (e) {
     setBusy(false);
     toast('辨識失敗：' + e.message, 4000);
@@ -748,7 +807,7 @@ function applySettings() {
   TOGGLES.forEach((k) => { $('#' + k).checked = !!settings[k]; });
   $$('#engineSeg button').forEach((b) => b.setAttribute('aria-checked', b.dataset.v === settings.engine));
   $$('#modelSeg button').forEach((b) => b.setAttribute('aria-checked', b.dataset.v === settings.model));
-  $('#whisperBox').hidden = settings.engine !== 'whisper';
+  $('#whisperBox').hidden = settings.engine === 'google';
   $('#googleBox').hidden = settings.engine !== 'google';
   document.documentElement.lang = settings.lang.startsWith('en') ? 'en' : 'zh-Hant';
 }
@@ -759,9 +818,29 @@ $$('#sizeSeg button').forEach((b) => b.onclick = () => { settings.size = b.datas
 $('#lang').onchange = (e) => { settings.lang = e.target.value; saveSettings(); applySettings(); checkOffline(); };
 TOGGLES.forEach((k) => { $('#' + k).onchange = (e) => { settings[k] = e.target.checked; saveSettings(); }; });
 $$('#engineSeg button').forEach((b) => b.onclick = () => {
-  settings.engine = b.dataset.v; saveSettings(); applySettings();
-  if (settings.engine === 'whisper') renderWhisperStatus(); else checkOffline();
+  settings.engine = b.dataset.v; googleFailed = false; saveSettings(); applySettings();
+  if (settings.engine === 'google') checkOffline(); else renderWhisperStatus();
 });
+
+/* 麥克風測試：錄一句話 → 播放給你聽 → 顯示離線辨識聽到什麼 */
+$('#btnMicTest').onclick = async () => {
+  const out = $('#micTestOut');
+  if (rec) { try { rec.stop(); } catch (e) {} return; }
+  out.textContent = '🔴 請說一句話，說完停一下…';
+  const btn = $('#btnMicTest'); btn.textContent = '⏹ 錄音中（按這裡結束）';
+  const r = await recordUtterance();
+  btn.textContent = '🎙 測試麥克風';
+  if (r.error) { out.textContent = r.error === 'no-speech' ? '沒有聽到聲音，麥克風可能沒收到音。' : r.error === 'not-allowed' ? '沒有麥克風權限。' : '已取消。'; return; }
+  lastAudio = r.audio.slice();
+  out.textContent = `錄到 ${(r.audio.length / 16000).toFixed(1)} 秒，正在播放…`;
+  playAudio(r.audio);
+  if (whisper.state !== 'ready') { out.textContent += '（離線辨識還沒下載，所以只播放聲音）'; return; }
+  const res = await transcribe(r.audio.slice());
+  out.textContent = `離線辨識聽到：「${res.text.trim() || '（沒有）'}」・花了 ${(res.ms / 1000).toFixed(1)} 秒`;
+};
+$('#btnPlayLast').onclick = () => { if (lastAudio) playAudio(lastAudio); else toast('還沒有錄音（線上辨識不會留下錄音）'); };
+$('#btnClearLog').onclick = () => { recLog = []; store.set('recLog', recLog); renderLog(); };
+$('#diagPanel').addEventListener('toggle', renderLog);
 $$('#modelSeg button').forEach((b) => b.onclick = () => {
   settings.model = b.dataset.v; saveSettings(); applySettings(); renderWhisperStatus();
 });
@@ -769,7 +848,7 @@ $$('#modelSeg button').forEach((b) => b.onclick = () => {
 /* ---------- 啟動 ---------- */
 applySettings(); renderHome(); checkOffline();
 // 已下載過離線模型的話，開 App 時就先在背景載入
-if (settings.engine === 'whisper') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
+if (settings.engine !== 'google') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
   // 重新整理一次，讓多核心運算生效
