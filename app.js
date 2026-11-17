@@ -50,6 +50,36 @@ function toast(msg, ms = 3000) {
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/* ---------- Android 版 App：改用手機內建的 Google 語音辨識與發音 ---------- */
+const ANDROID = window.AndroidSpeech || null;
+let ttsSeq = 0;
+const ttsWaiters = new Map();
+window.__androidTTS = (id) => { const f = ttsWaiters.get(id); if (f) f(); };
+// 模仿瀏覽器的 SpeechRecognition，讓其他程式不用改
+class AndroidRecognition {
+  constructor() { this.lang = 'zh-TW'; this.onresult = this.onerror = this.onend = null; }
+  start() { AndroidRecognition.active = this; ANDROID.startListening(this.lang); }
+  stop() { ANDROID.stopListening(); }
+  abort() { if (AndroidRecognition.active === this) AndroidRecognition.active = null; ANDROID.abortListening(); }
+}
+window.__androidSR = (m) => {
+  const r = AndroidRecognition.active; if (!r) return;
+  if (m.type === 'result') {
+    const alt = (m.alts || []).map((t) => ({ transcript: t, confidence: 0 }));
+    alt.isFinal = true;
+    if (r.onresult) r.onresult({ results: [alt] });
+  } else if (m.type === 'error') { if (r.onerror) r.onerror({ error: m.error }); }
+  else if (m.type === 'end') { AndroidRecognition.active = null; if (r.onend) r.onend(); }
+};
+// 返回鍵：關掉對話框或回首頁；已經在首頁就離開 App
+window.__androidBack = () => {
+  const d = document.querySelector('dialog[open]');
+  if (d) { d.close(); return true; }
+  const a = document.querySelector('.screen.active');
+  if (a && a.id !== 'scr-home') { showScreen('home'); return true; }
+  return false;
+};
+
 /* ---------- 文字轉語音 (TTS) ---------- */
 let voices = [];
 function loadVoices() { try { voices = speechSynthesis.getVoices(); } catch (e) { voices = []; } }
@@ -65,6 +95,15 @@ function pickVoice() {
 
 function speak(text, rate) {
   return new Promise((resolve) => {
+    if (ANDROID) {
+      const id = 't' + (++ttsSeq), r = rate || settings.rate;
+      let done = false;
+      const finish = () => { if (!done) { done = true; ttsWaiters.delete(id); resolve(); } };
+      ttsWaiters.set(id, finish);
+      setTimeout(finish, 3000 + text.length * 900 / r);
+      ANDROID.speak(text, settings.lang, r, id);
+      return;
+    }
     if (!('speechSynthesis' in window)) { toast('這台裝置不支援發音'); return resolve(); }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
@@ -103,7 +142,11 @@ const CLOSE = ['很接近了，很棒！', '差一點點就完美了！', '說�
 const RETRY = ['沒關係，再試一次。', '慢慢來，我們再說一次。', '加油，再試一次就好。', '你可以的，再來一次。'];
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 let voiceToken = 0; // 換題時中止還沒說完的語音
-const cancelVoice = () => { voiceToken++; if ('speechSynthesis' in window) speechSynthesis.cancel(); };
+const cancelVoice = () => {
+  voiceToken++;
+  if (ANDROID) ANDROID.stopSpeaking();
+  else if ('speechSynthesis' in window) speechSynthesis.cancel();
+};
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // kind: 'ok' | 'close' | 'retry'
@@ -214,7 +257,7 @@ function showScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === 'scr-' + name));
   if (name === 'home') renderHome();
   if (name === 'words') renderList();
-  if (name === 'settings') { if (settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); refreshDelBox(); }
+  if (name === 'settings') { if (ANDROID || settings.engine === 'google') checkOffline(); else renderWhisperStatus(); renderLog(); refreshDelBox(); }
   window.scrollTo(0, 0);
 }
 $$('[data-home]').forEach((b) => b.onclick = () => showScreen('home'));
@@ -335,7 +378,7 @@ function showResult(r) {
 }
 
 /* ---------- 語音辨識 ---------- */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const SR = ANDROID ? AndroidRecognition : (window.SpeechRecognition || window.webkitSpeechRecognition);
 let rec = null;
 const btnSpeak = $('#btnSpeak');
 
@@ -356,7 +399,7 @@ function stopListening() { if (rec) { try { rec.abort(); } catch (e) {} rec = nu
 /* ---------- 辨識紀錄（給家人查看辨識狀況） ---------- */
 let recLog = store.get('recLog', []);
 let lastAudio = null; // 最近一次離線辨識錄到的聲音，可以播放檢查
-const ENGINE_NAME = { whisper: '離線', google: '線上' };
+const ENGINE_NAME = { whisper: '離線', google: ANDROID ? 'Google' : '線上' };
 function logAttempt(engine, target, heard, r, ms) {
   recLog.unshift({
     t: Date.now(), engine, target, heard: heard.slice(0, 5),
@@ -392,7 +435,7 @@ function playAudio(audio) {
 // 用哪一種辨識：自動 = 有網路用線上（比較準），沒網路用離線
 let googleFailed = false;
 function pickEngine() {
-  if (settings.engine === 'google') return 'google';
+  if (ANDROID || settings.engine === 'google') return 'google';
   if (settings.engine === 'auto' && SR && navigator.onLine && !googleFailed) return 'google';
   return 'whisper';
 }
@@ -443,8 +486,10 @@ function startGoogle(w) {
       'audio-capture': '找不到麥克風',
       'not-allowed': '請允許使用麥克風',
       'service-not-allowed': '請允許使用麥克風',
-      network: '沒有網路，請家人到「設定」下載離線語音辨識',
-      'language-not-supported': '請家人到「設定」下載離線語音辨識',
+      network: ANDROID ? '沒有網路，請家人到「設定」下載離線語音包' : '沒有網路，請家人到「設定」下載離線語音辨識',
+      'language-not-supported': ANDROID ? '請家人到「設定」下載離線語音包' : '請家人到「設定」下載離線語音辨識',
+      'not-available': '這支手機沒有 Google 語音辨識，請安裝「Google」App',
+      busy: '請再按一次「我來說」',
       aborted: '',
     }[e.error];
     if (msg !== '') toast(msg || '辨識失敗：' + e.error, 4000);
@@ -693,6 +738,7 @@ $('#btnNext').onclick = () => goto(1);
 async function checkOffline() {
   const el = $('#offlineStatus'), btn = $('#btnInstallOffline');
   btn.hidden = true;
+  if (ANDROID) return checkOfflineAndroid();
   if (!SR) { el.textContent = '這個瀏覽器不支援語音辨識。建議使用 Android 手機或平板上的 Chrome。'; return; }
   if (typeof SR.available !== 'function') {
     settings.offline = false; saveSettings();
@@ -708,7 +754,31 @@ async function checkOffline() {
   } catch (e) { settings.offline = false; el.textContent = '無法檢查離線辨識：' + e.message; }
   saveSettings();
 }
+// Android App：查手機的 Google 離線語音包
+let androidOfflineState = 'unknown';
+function checkOfflineAndroid() {
+  const el = $('#offlineStatus'), btn = $('#btnInstallOffline');
+  el.textContent = '檢查中…';
+  const tip = '在手機的「Google」App → 右上角頭像 → 設定 → 語音 → 離線語音辨識，下載「中文（台灣）」（請用 Wi-Fi）。';
+  window.__androidOffline = (state) => {
+    androidOfflineState = state;
+    btn.hidden = state === 'installed' || state === 'downloading';
+    el.textContent = {
+      installed: '✔ 已下載離線語音包，沒有網路也能判斷。',
+      downloading: '離線語音包下載中…請稍候再回來看。',
+      downloadable: '有網路時用 Google 線上辨識。按下面的按鈕下載離線語音包（請用 Wi-Fi），之後沒有網路也能判斷。',
+    }[state] || '有網路時用 Google 線上辨識。要沒有網路也能用，請' + tip;
+  };
+  ANDROID.checkOffline(settings.lang);
+}
+
 $('#btnInstallOffline').onclick = async () => {
+  if (ANDROID) {
+    if (androidOfflineState === 'downloadable') ANDROID.downloadOffline(settings.lang);
+    else ANDROID.openVoiceSettings();
+    setTimeout(checkOffline, 3000);
+    return;
+  }
   try {
     $('#offlineStatus').textContent = '下載中…';
     const ok = await SR.install({ langs: [settings.lang], processLocally: true });
@@ -796,9 +866,12 @@ addDlg.addEventListener('close', () => {
 });
 
 $('#btnExport').onclick = () => {
-  const blob = new Blob([JSON.stringify({ app: 'speak-practice', version: 2, words }, null, 2)], { type: 'application/json' });
+  const json = JSON.stringify({ app: 'speak-practice', version: 2, words }, null, 2);
+  const name = `說說看詞庫-${new Date().toISOString().slice(0, 10)}.json`;
+  if (ANDROID) { ANDROID.saveFile(name, json); return; }
+  const blob = new Blob([json], { type: 'application/json' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = `說說看詞庫-${new Date().toISOString().slice(0, 10)}.json`;
+  a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 };
@@ -839,6 +912,11 @@ function applySettings() {
   $('#whisperBox').hidden = settings.engine === 'google';
   $('#googleBox').hidden = settings.engine !== 'google';
   document.documentElement.lang = settings.lang.startsWith('en') ? 'en' : 'zh-Hant';
+  if (ANDROID) {
+    // App 版只用手機的 Google 辨識，不需要選擇方式和麥克風測試
+    $('#engineSeg').hidden = true; $('#whisperBox').hidden = true; $('#googleBox').hidden = false;
+    $('#btnMicTest').hidden = true; $('#btnPlayLast').hidden = true; $('#androidDl').hidden = true;
+  }
 }
 $('#rate').oninput = (e) => { settings.rate = +e.target.value; saveSettings(); applySettings(); };
 $('#btnTestVoice').onclick = () => speak('你好，我們一起來說說看');
@@ -877,8 +955,8 @@ $$('#modelSeg button').forEach((b) => b.onclick = () => {
 /* ---------- 啟動 ---------- */
 applySettings(); renderHome(); checkOffline();
 // 已下載過離線模型的話，開 App 時就先在背景載入
-if (settings.engine !== 'google') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
-if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+if (!ANDROID && settings.engine !== 'google') whisperCached(settings.model).then((ok) => { if (ok) loadWhisper(); });
+if (!ANDROID && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
   // 重新整理一次，讓多核心運算生效
   if (!window.crossOriginIsolated) {

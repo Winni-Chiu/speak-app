@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 對話框圖示（與網頁版 icon.svg 相同），放在 108dp 的安全範圍內 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="512" android:viewportHeight="512">
+    <group android:scaleX="0.62" android:scaleY="0.62" android:pivotX="256" android:pivotY="256">
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M120,150h272a40,40 0,0 1,40 40v130a40,40 0,0 1,-40 40H250l-80,64v-64h-50a40,40 0,0 1,-40 -40V190a40,40 0,0 1,40 -40z" />
+        <path android:fillColor="#2F6F5E" android:pathData="M164,255a22,22 0,1 0,44 0a22,22 0,1 0,-44 0z" />
+        <path android:fillColor="#2F6F5E" android:pathData="M234,255a22,22 0,1 0,44 0a22,22 0,1 0,-44 0z" />
+        <path android:fillColor="#2F6F5E" android:pathData="M304,255a22,22 0,1 0,44 0a22,22 0,1 0,-44 0z" />
+    </group>
+</vector>

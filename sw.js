@@ -1,5 +1,5 @@
 // 離線快取：第一次打開後，之後不用網路也能使用
-const CACHE = 'speak-v11';
+const CACHE = 'speak-v12';
 // 離線語音辨識引擎檔案很大（約 22MB），放在另一個快取，App 更新時不用重新下載
 const ENGINE_CACHE = 'speak-engine-transformers-3.5.1';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'worker.js', 'pinyin-pro.js', 'manifest.webmanifest', 'icon.svg'];

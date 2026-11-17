@@ -1,0 +1,57 @@
+# 每次更新 App，GitHub 會自動做出 Android 安裝檔（APK），
+# 放在 https://github.com/Winni-Chiu/speak-app/releases/download/android/speak.apk
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'index.html'
+      - 'app.js'
+      - 'style.css'
+      - 'pinyin-pro.js'
+      - 'icon.svg'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Copy web app into the Android project
+        run: |
+          mkdir -p android/app/src/main/assets/www
+          cp index.html style.css app.js pinyin-pro.js manifest.webmanifest icon.svg android/app/src/main/assets/www/
+
+      - name: Build APK
+        working-directory: android
+        run: gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk speak.apk
+          gh release view android >/dev/null 2>&1 || gh release create android \
+            --title "說說看 Android 版" \
+            --notes "下載 speak.apk 安裝到 Android 手機。每次 App 更新，這裡的檔案會自動換成最新版。"
+          gh release upload android speak.apk --clobber
