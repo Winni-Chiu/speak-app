@@ -202,10 +202,13 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             return;
         }
+        List<String> engines = new ArrayList<>();
+        engines.add("default");
+        for (ComponentName c : recognitionServices()) engines.add(c.flattenToString());
+        if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) engines.add("ondevice");
+        // 每個引擎都試幾種語言代碼（離線語音包常用 cmn-Hant-TW，而不是 zh-TW）
         attempts.clear();
-        attempts.add("default");
-        for (ComponentName c : recognitionServices()) attempts.add(c.flattenToString());
-        if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) attempts.add("ondevice");
+        for (String e : engines) for (String l : langVariants(lang)) attempts.add(e + "\n" + l);
         attemptIdx = 0;
         trace.setLength(0);
         trace.append(isOnline() ? "有網路" : "沒網路");
@@ -220,9 +223,24 @@ public class MainActivity extends Activity {
             for (ResolveInfo ri : list) {
                 if (ri.serviceInfo == null) continue;
                 ComponentName c = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
-                if (ri.serviceInfo.packageName.startsWith("com.google")) out.add(0, c); else out.add(c);
+                String pkg = ri.serviceInfo.packageName;
+                // 只用 Google 和三星的辨識服務（其他 App 提供的服務不一定能用）
+                if (pkg.startsWith("com.google")) out.add(0, c);
+                else if (pkg.startsWith("com.samsung") || pkg.startsWith("com.sec")) out.add(c);
             }
         } catch (Exception ignored) { }
+        return out;
+    }
+
+    /** 同一個語言的不同寫法；Google 離線語音包「國語（台灣）」的代碼是 cmn-Hant-TW */
+    private static List<String> langVariants(String lang) {
+        List<String> out = new ArrayList<>();
+        out.add(lang);
+        switch (lang) {
+            case "zh-TW": out.add("cmn-Hant-TW"); out.add("zh-Hant-TW"); break;
+            case "zh-CN": out.add("cmn-Hans-CN"); out.add("zh-Hans-CN"); break;
+            case "zh-HK": out.add("yue-Hant-HK"); break;
+        }
         return out;
     }
 
@@ -240,7 +258,10 @@ public class MainActivity extends Activity {
     private void runAttempt() {
         destroyRecognizer();
         final int my = ++session;
-        final String a = attempts.get(attemptIdx);
+        final String[] pair = attempts.get(attemptIdx).split("\n");
+        final String a = pair[0];
+        final String lng = pair[1];
+        final String tag = label(a) + (lng.equals(currentLang) ? "" : "[" + lng + "]");
         final boolean online = isOnline();
         try {
             if (a.equals("ondevice")) {
@@ -252,7 +273,7 @@ public class MainActivity extends Activity {
                 recognizer = SpeechRecognizer.createSpeechRecognizer(this, ComponentName.unflattenFromString(a));
             }
         } catch (Exception e) {
-            trace.append(" → ").append(label(a)).append(":無法啟動");
+            trace.append(" → ").append(tag).append(":無法啟動");
             nextAttemptOrFail("not-available");
             return;
         }
@@ -264,7 +285,7 @@ public class MainActivity extends Activity {
             @Override public void onResults(Bundle b) {
                 if (my != session) return;
                 ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                trace.append(" → ").append(label(a)).append(":成功");
+                trace.append(" → ").append(tag).append(":成功");
                 JSONObject o = new JSONObject();
                 try {
                     o.put("type", "result");
@@ -280,7 +301,7 @@ public class MainActivity extends Activity {
             @Override public void onError(int err) {
                 if (my != session) return;
                 String code = errorCode(err);
-                trace.append(" → ").append(label(a)).append(":").append(code).append("(").append(err).append(")");
+                trace.append(" → ").append(tag).append(":").append(code).append("(").append(err).append(")");
                 long elapsed = System.currentTimeMillis() - attemptStart;
                 // 這個引擎不能用（通常是沒網路又沒離線語音包）：換下一個引擎再試
                 boolean engineFailed = !code.equals("not-allowed") && !began
@@ -301,7 +322,7 @@ public class MainActivity extends Activity {
             @Override public void onEvent(int eventType, Bundle params) { }
         });
 
-        recognizer.startListening(recognizeIntent(currentLang, !online));
+        recognizer.startListening(recognizeIntent(lng, !online));
     }
 
     private void nextAttemptOrFail(String code) {
