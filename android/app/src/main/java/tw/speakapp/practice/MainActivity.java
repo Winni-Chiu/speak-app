@@ -202,16 +202,29 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             return;
         }
+        final boolean online = isOnline();
+        // 引擎順序：沒網路時 Google 語音服務（離線語音包所在）優先，其次是手機預設
         List<String> engines = new ArrayList<>();
+        List<ComponentName> services = recognitionServices();
+        if (!online) for (ComponentName c : services)
+            if (c.getPackageName().equals("com.google.android.tts")) engines.add(c.flattenToString());
         engines.add("default");
-        for (ComponentName c : recognitionServices()) engines.add(c.flattenToString());
+        for (ComponentName c : services) if (!engines.contains(c.flattenToString())) engines.add(c.flattenToString());
         if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) engines.add("ondevice");
-        // 每個引擎都試幾種語言代碼（離線語音包常用 cmn-Hant-TW，而不是 zh-TW）
+
+        // 每個引擎都試幾種語言代碼；離線語音包用 cmn-Hant-TW，所以沒網路時它排第一
+        List<String> langs = langVariants(lang);
+        if (!online && langs.size() > 1) langs.add(0, langs.remove(1));
         attempts.clear();
-        for (String e : engines) for (String l : langVariants(lang)) attempts.add(e + "\n" + l);
+        for (String e : engines) for (String l : langs) attempts.add(e + "\n" + l);
+
+        // 上次成功的方式排最前面
+        String last = getSharedPreferences("speech", MODE_PRIVATE).getString(lastOkKey(lang, online), null);
+        if (last != null && attempts.remove(last)) attempts.add(0, last);
+
         attemptIdx = 0;
         trace.setLength(0);
-        trace.append(isOnline() ? "有網路" : "沒網路");
+        trace.append(online ? "有網路" : "沒網路");
         runAttempt();
     }
 
@@ -230,6 +243,10 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) { }
         return out;
+    }
+
+    private static String lastOkKey(String lang, boolean online) {
+        return "ok_" + lang + (online ? "_online" : "_offline");
     }
 
     /** 同一個語言的不同寫法；Google 離線語音包「國語（台灣）」的代碼是 cmn-Hant-TW */
@@ -286,6 +303,8 @@ public class MainActivity extends Activity {
                 if (my != session) return;
                 ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 trace.append(" → ").append(tag).append(":成功");
+                getSharedPreferences("speech", MODE_PRIVATE).edit()
+                        .putString(lastOkKey(currentLang, online), attempts.get(attemptIdx)).apply();
                 JSONObject o = new JSONObject();
                 try {
                     o.put("type", "result");
