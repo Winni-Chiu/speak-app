@@ -32,7 +32,7 @@ words.forEach((w) => {
 
 const settings = Object.assign(
   { rate: 0.7, strict: 'normal', size: 'XL', lang: 'zh-TW', shuffle: false,
-    autoReplay: true, autoNext: true, voiceFeedback: true, autoSpeak: true,
+    autoReplay: true, autoNext: true, voiceFeedback: true, autoSpeak: true, autoListen: true,
     engine: 'auto', model: 'tiny' },
   store.get('settings', {})
 );
@@ -317,14 +317,28 @@ function renderWord(levels) {
   $('#btnPrev').disabled = session.pos === 0;
 }
 
+// 唸完後自動開始聽，不用按「我來說」（每個詞最多自動聽 3 次，之後等使用者自己按）
+let autoTries = 0;
+function maybeAutoListen(my) {
+  if (!settings.autoListen || autoTries >= 3) return;
+  wait(250).then(() => {
+    if (my !== voiceToken || rec || busy || !$('#scr-practice').classList.contains('active')) return;
+    autoTries++;
+    startListening();
+  });
+}
+
 function showWord(fresh) {
   stopListening(); cancelVoice();
   elResult.hidden = true; elResult.innerHTML = '';
-  listenPresses = 0;
+  listenPresses = 0; autoTries = 0;
   renderWord();
-  if (fresh && settings.autoSpeak && current()) {
-    const my = voiceToken;
-    wait(300).then(() => { if (my === voiceToken) speak(current().text); });
+  if (!fresh || !current()) return;
+  const my = voiceToken;
+  if (settings.autoSpeak) {
+    wait(300).then(() => { if (my === voiceToken) speak(current().text).then(() => maybeAutoListen(my)); });
+  } else {
+    maybeAutoListen(my);
   }
 }
 
@@ -377,7 +391,8 @@ function showResult(r) {
   elResult.textContent = '再試一次 💪';
   renderWord(r.levels);
   chime(false);
-  voiceFeedback('retry', w.text);
+  const token = voiceToken + 1;
+  voiceFeedback('retry', w.text).then((finished) => { if (finished) maybeAutoListen(token); });
 }
 
 /* ---------- 語音辨識 ---------- */
@@ -726,14 +741,16 @@ $('#btnWhisperDel').onclick = async () => {
 // 「聽」：第一次正常唸，再按一次會一個字一個字慢慢唸，輪流
 $('#btnListen').onclick = () => {
   const w = current(); if (!w) return;
-  cancelVoice();
+  stopListening(); cancelVoice();
   listenPresses++;
-  if (listenPresses % 2 === 0 && Array.from(norm(w.text)).length > 1) speakSlow(w.text); else speak(w.text);
+  const my = voiceToken;
+  (listenPresses % 2 === 0 && Array.from(norm(w.text)).length > 1 ? speakSlow(w.text) : speak(w.text))
+    .then(() => maybeAutoListen(my));
 };
 // 點整個詞唸整個詞；說錯後點某個字只唸那個字
 elWord.onclick = (e) => {
   const w = current(); if (!w) return;
-  cancelVoice();
+  stopListening(); cancelVoice();
   const span = e.target.closest('.ch.miss, .ch.close');
   if (span) speak(span.dataset.ch, Math.max(0.4, settings.rate - 0.1)); else speak(w.text);
 };
@@ -905,7 +922,7 @@ $('#btnResetStatus').onclick = () => {
 };
 
 /* ---------- 設定 ---------- */
-const TOGGLES = ['autoSpeak', 'voiceFeedback', 'autoReplay', 'autoNext', 'shuffle'];
+const TOGGLES = ['autoSpeak', 'autoListen','voiceFeedback', 'autoReplay', 'autoNext', 'shuffle'];
 function applySettings() {
   document.documentElement.dataset.size = settings.size;
   $('#rate').value = settings.rate;
